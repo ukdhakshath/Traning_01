@@ -1,0 +1,96 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: sam-login-Dhak
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build SAM Application
+        run: sam build
+
+      - name: Deploy SAM Infrastructure & Backend
+        run: |
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --stack-name ${{ env.STACK_NAME }} \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy Frontend to S3 & Invalidate CloudFront
+        run: |
+          echo "Fetching CloudFormation stack outputs..."
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiURL'].OutputValue" \
+            --output text)
+
+          BUCKET_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" \
+            --output text)
+
+          DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue" \
+            --output text)
+
+          WEBSITE_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='WebsiteURL'].OutputValue" \
+            --output text)
+
+          echo "API URL: $API_URL"
+          echo "Bucket: $BUCKET_NAME"
+          echo "CloudFront Distribution: $DISTRIBUTION_ID"
+          echo "Website URL: $WEBSITE_URL"
+
+          # Inject active API endpoint into index.html
+          sed -i "s|__API_URL__|$API_URL|g" frontend/index.html
+
+          # Upload directly to S3
+          aws s3 cp frontend/index.html "s3://${BUCKET_NAME}/index.html"
+
+          # Invalidate CloudFront cache
+          aws cloudfront create-invalidation \
+            --distribution-id "$DISTRIBUTION_ID" \
+            --paths "/*"
+
+          # Output summary to GitHub Actions UI
+          echo "### 🚀 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Frontend URL:** $WEBSITE_URL" >> $GITHUB_STEP_SUMMARY
+          echo "- **API URL:** $API_URL" >> $GITHUB_STEP_SUMMARY
+          echo "- **S3 Bucket:** \`$BUCKET_NAME\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **CloudFront ID:** \`$DISTRIBUTION_ID\`" >> $GITHUB_STEP_SUMMARY
